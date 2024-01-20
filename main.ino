@@ -15,7 +15,7 @@
 const char* ssid = "ESP32Connect";
 const char* password = "hellothere";
 
-String serverName = "http://badaltest.free.beeceptor.com/";
+String serverName = "http://badaltestv2.free.beeceptor.com/";
 
 SerialPM pms(PMSx003, 32, 27);  // PMSx003, RX, TX
 MHZ co2(MH_Z19_RX, MH_Z19_TX, CO2_IN, MHZ19B);
@@ -76,7 +76,7 @@ void loop() {
   if(WiFi.status()== WL_CONNECTED){
       HTTPClient http;
 
-      String serverPath = serverName + "?temperature=24.37";
+      String serverPath = serverName + "?pm1=" + pms.pm01;
       
       // Your Domain name with URL path or IP address with path
       http.begin(serverPath.c_str());
