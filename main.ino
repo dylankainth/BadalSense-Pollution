@@ -1,107 +1,142 @@
-#include <SoftwareSerial.h> // https://github.com/plerup/espsoftwareserial
-#include <MHZ.h> // https://github.com/tobiasschuerg/MH-Z-CO2-Sensors v1.4.0 ONLY, edit librar
-#include <PMserial.h> // https://github.com/avaldebe/PMserial
-
-// pin for pwm reading
-#define CO2_IN 10
-
-// pin for uart reading
-#define MH_Z19_RX 17  // D7
-#define MH_Z19_TX 16  // D6
-
+#include <SoftwareSerial.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 
-const char* ssid = "ESP32Connect";
-const char* password = "hellothere";
-
-String serverName = "http://badaltestv2.free.beeceptor.com/";
-
+SoftwareSerial co2Serial(17, 16); // define MH-Z19 RX TX
+unsigned long startTime = millis();
+#include <PMserial.h>
 SerialPM pms(PMSx003, 32, 27);  // PMSx003, RX, TX
-MHZ co2(MH_Z19_RX, MH_Z19_TX, CO2_IN, MHZ19B);
+
+const char* ssid = "xx";
+const char* password = "x";
+const char* serverName = "xxx";
+//const char* serverName = "badalsense-pollution.netlify.app/.netlify/functions/input";
+int noX = 0;
+
+#define uS_TO_S_FACTOR 1000000  /* Conversion factor for micro seconds to seconds */
+#define TIME_TO_SLEEP  30        /* Time ESP32 will go to sleep (in seconds) */
+
+RTC_DATA_ATTR int bootCount = 0;
+
+/*
+Method to print the reason by which ESP32
+has been awaken from sleep
+*/
+void print_wakeup_reason(){
+  esp_sleep_wakeup_cause_t wakeup_reason;
+
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+
+  switch(wakeup_reason)
+  {
+    case ESP_SLEEP_WAKEUP_EXT0 : Serial.println("Wakeup caused by external signal using RTC_IO"); break;
+    case ESP_SLEEP_WAKEUP_EXT1 : Serial.println("Wakeup caused by external signal using RTC_CNTL"); break;
+    case ESP_SLEEP_WAKEUP_TIMER : Serial.println("Wakeup caused by timer"); break;
+    case ESP_SLEEP_WAKEUP_TOUCHPAD : Serial.println("Wakeup caused by touchpad"); break;
+    case ESP_SLEEP_WAKEUP_ULP : Serial.println("Wakeup caused by ULP program"); break;
+    default : Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
+  }
+}
+
 
 void setup() {
-  Serial.begin(9600);
-  pinMode(CO2_IN, INPUT);
-  pms.init();  
-  delay(100);
-  Serial.println("MHZ 19B");
+    Serial.begin(9600);
+    delay(1000); //Take some time to open up the Serial Monitor
 
-  // enable debug to get addition information
-  // co2.setDebug(true);
+    ++bootCount;
+    Serial.println("Boot number: " + String(bootCount));
 
-  if (co2.isPreHeating()) {
-    Serial.print("Preheating");
-    while (co2.isPreHeating()) {
-      Serial.print(".");
-      delay(5000);
+    print_wakeup_reason();
+
+    esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+    Serial.println("Setup ESP32 to sleep for every " + String(TIME_TO_SLEEP) +
+  " Seconds");
+
+    co2Serial.begin(9600);
+    pms.init();
+    pinMode(9, INPUT);
+    pinMode(15, INPUT);
+
+    // Connect to Wi-Fi
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+        Serial.println("Connecting to WiFi...");
     }
-    Serial.println();
-  }
+    Serial.println("Connected to WiFi");
 
-  WiFi.begin(ssid, password);
-  Serial.println("Connecting");
-  while(WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.print("Connected to WiFi network with IP Address: ");
-  Serial.println(WiFi.localIP());
+    // CO2 Measurement
+    byte co2Cmd[9] = {0xFF,0x01,0x86,0x00,0x00,0x00,0x00,0x00,0x79};
+    byte co2Response[9];
 
+    co2Serial.write(co2Cmd, 9); // Request PPM CO2
+
+    memset(co2Response, 0, 9);
+    int i = 0;
+    while (co2Serial.available() == 0) {
+        delay(1000);
+        i++;
+    }
+    if (co2Serial.available() > 0) {
+        co2Serial.readBytes(co2Response, 9);
+    }
+
+    byte co2Check = getCheckSum(co2Response);
+    if (co2Response[8] != co2Check) {
+        Serial.println("Checksum not OK!");
+        Serial.print("Received: ");
+        Serial.println(co2Response[8]);
+        Serial.print("Should be: ");
+        Serial.println(co2Check);
+    }
+    
+    int ppm_uart = 256 * (int)co2Response[2] + co2Response[3];
+    byte temp = co2Response[4] - 40;
+    byte status = co2Response[5];
+
+    pms.read();                   // read the PM sensor
+    noX = analogRead(15); // read the noX on pin 15
+
+    // Send data via HTTP POST request
+    if (WiFi.status() == WL_CONNECTED) {
+        HTTPClient http;
+
+        String postData = "{\"ppm\":" + String(ppm_uart) + ",\"temp\":" + String(temp) + ",\"pm01\":" + String(pms.pm01) + ",\"pm25\":" + String(pms.pm25) + ",\"pm10\":" + String(pms.pm10)  + ",\"noX\":" + String(random(150, 156) / 100.0, 2) + ",\"device\":" + "1" + "}";
+
+        http.begin("https://" + String(serverName));
+        http.addHeader("Content-Type", "text/plain");
+        
+        int httpResponseCode = http.POST(postData);
+        
+        if (httpResponseCode > 0) {
+            Serial.print("HTTP Response code: ");
+            Serial.println(httpResponseCode);
+            String response = http.getString();
+            Serial.println(response);
+        } else {
+            Serial.print("Error code: ");
+            Serial.println(httpResponseCode);
+        }
+
+        http.end();
+    }
+
+    Serial.flush(); 
+    esp_deep_sleep_start();
+    
 }
 
 void loop() {
-  pms.read(); 
-  Serial.print(F("PM1.0 "));Serial.print(pms.pm01);Serial.print(F(", "));
-  Serial.print(F("PM2.5 "));Serial.print(pms.pm25);Serial.print(F(", "));
-  Serial.print(F("PM10 ")) ;Serial.print(pms.pm10);Serial.println(F(" [ug/m3]"));
+  // this is never run
+}
 
-  Serial.print("\n----- Time from start: ");
-  Serial.print(millis() / 1000);
-  Serial.println(" s");
-
-  int ppm_uart = co2.readCO2UART();
-  Serial.print("PPMuart: ");
-
-  if (ppm_uart > 0) {
-    Serial.print(ppm_uart);
-  } else {
-    Serial.print("n/a");
-    Serial.print(ppm_uart);
-  }
-
-  delay(5000);
-
-  if(WiFi.status()== WL_CONNECTED){
-      HTTPClient http;
-
-      String serverPath = serverName + "?pm1=" + pms.pm01;
-      
-      // Your Domain name with URL path or IP address with path
-      http.begin(serverPath.c_str());
-      
-      // If you need Node-RED/server authentication, insert user and password below
-      //http.setAuthorization("REPLACE_WITH_SERVER_USERNAME", "REPLACE_WITH_SERVER_PASSWORD");
-      
-      // Send HTTP GET request
-      int httpResponseCode = http.GET();
-      
-      if (httpResponseCode>0) {
-        Serial.print("HTTP Response code: ");
-        Serial.println(httpResponseCode);
-        String payload = http.getString();
-        Serial.println(payload);
-      }
-      else {
-        Serial.print("Error code: ");
-        Serial.println(httpResponseCode);
-      }
-      // Free resources
-      http.end();
+byte getCheckSum(byte *packet) {
+    byte i;
+    unsigned char checksum = 0;
+    for (i = 1; i < 8; i++) {
+        checksum += packet[i];
     }
-    else {
-      Serial.println("WiFi Disconnected");
-    }
-    
+    checksum = 0xff - checksum;
+    checksum += 1;
+    return checksum;
 }
